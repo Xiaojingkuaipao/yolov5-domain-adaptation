@@ -143,7 +143,7 @@ def check_imshow():
 
 
 def check_file(file):
-    # Search for file if not found
+    """在当前目录及其子目录中查找指定的文件，并返回其完整路径。"""
     if os.path.isfile(file) or file == '':
         return file
     else:

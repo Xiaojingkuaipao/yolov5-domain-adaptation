@@ -74,7 +74,7 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
     sampler = torch.utils.data.distributed.DistributedSampler(dataset) if rank != -1 else None
-    loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoader
+    loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoader # 可以无限循环的DataLoader
     # Use torch.utils.data.DataLoader() if dataset.properties will update during training else InfiniteDataLoader()
     dataloader = loader(dataset,
                         batch_size=batch_size,
@@ -115,7 +115,7 @@ class _RepeatSampler(object):
         self.sampler = sampler
 
     def __iter__(self):
-        while True:
+        while True: # 这个采样器可以一直从采样器中采样
             yield from iter(self.sampler)
 
 

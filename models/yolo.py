@@ -34,14 +34,14 @@ class Detect(nn.Module):
         self.grid = [torch.zeros(1)] * self.nl  # init grid
         a = torch.tensor(anchors).float().view(self.nl, -1, 2)
         self.register_buffer('anchors', a)  # shape(nl,na,2)
-        self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2)
+        self.register_buffer('anchor_grid', a.clone().view(self.nl, 1, -1, 1, 1, 2))  # shape(nl,1,na,1,1,2) [nl, batch_size, num_anchors, H, W, 2]
         self.m = nn.ModuleList(nn.Conv2d(x, self.no * self.na, 1) for x in ch)  # output conv
 
     def forward(self, x):
         # x = x.copy()  # for profiling
         z = []  # inference output
         self.training |= self.export
-        for i in range(self.nl):
+        for i in range(self.nl): # 分别对每个特征层做预测
             x[i] = self.m[i](x[i])  # conv
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
@@ -218,13 +218,13 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in [Conv, GhostConv, Bottleneck, GhostBottleneck, SPP, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP,
                  C3, C3TR]:
-            c1, c2 = ch[f], args[0]
+            c1, c2 = ch[f], args[0] # args[out_channel, kernel_size, stride]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
 
-            args = [c1, c2, *args[1:]]
-            if m in [BottleneckCSP, C3, C3TR]:
-                args.insert(2, n)  # number of repeats
+            args = [c1, c2, *args[1:]] # [in_channel, out_channel, kernel_size, stride]
+            if m in [BottleneckCSP, C3, C3TR]: # 需要重复的模块,也就是BottleNeck，插入重复模块的重复次数,C3中含有bottleneck
+                args.insert(2, n)  # number of repeats [in_channel, out_channel, repeats, kernel_size, stride]
                 n = 1
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
