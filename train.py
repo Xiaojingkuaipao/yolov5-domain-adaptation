@@ -24,8 +24,10 @@ from tqdm import tqdm
 import test  # import test.py to get mAP after each epoch
 from models.experimental import attempt_load
 from models.yolo import Model
+from models.MKMMD import MKMMD2
 from utils.autoanchor import check_anchors
 from utils.datasets import create_dataloader
+from utils.unlabeled_dataset import create_target_dataloader
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
@@ -34,6 +36,7 @@ from utils.loss import ComputeLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
+
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +197,16 @@ def train(hyp, opt, device, tb_writer=None):
     nb = len(dataloader)  # number of batches
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
 
+    # Build TargetDataLoader
+    with open(opt.target_data, 'r') as f:
+        target_data_dict = yaml.load(f, Loader=yaml.SafeLoader)
+    target_train_path = target_data_dict['train']
+    target_dataloader, target_dataset = create_target_dataloader(target_train_path, imgsz, batch_size, gs, opt,
+                                                                 hyp=hyp, augment=True, cache=opt.cache_images,
+                                                                 rect=opt.rect, rank=rank, world_size=opt.world_size,
+                                                                 workers=opt.workers, image_weights=opt.image_weights,
+                                                                 quad=opt.quad, prefix=colorstr('target data: '))
+
     # Process 0
     if rank in [-1, 0]:
         testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, opt,  # testloader
@@ -242,10 +255,14 @@ def train(hyp, opt, device, tb_writer=None):
     scheduler.last_epoch = start_epoch - 1  # do not move
     scaler = amp.GradScaler(enabled=cuda)
     compute_loss = ComputeLoss(model)  # init loss class
+    mk_mmd = MKMMD2()
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
                 f'Starting training for {epochs} epochs...')
+    da_layers = opt.da_layers
+    da_weights = opt.da_weights
+    assert len(da_layers) == len(da_weights), "len(da_layers) must equal len(da_weights)"
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
@@ -267,18 +284,21 @@ def train(hyp, opt, device, tb_writer=None):
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(4, device=device)  # mean losses
+        mloss = torch.zeros(5, device=device)  # mean losses
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
-        logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
+        logger.info(('\n' + '%10s' * 9) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'da', 'total', 'labels', 'img_size'))
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
+        target_iter = iter(target_dataloader)
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
+            target_images, target_paths, _ = next(target_iter)
+            target_images = target_images.to(device, non_blocking=True).float() / 255.0
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
@@ -300,8 +320,15 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward
             with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
+                total_images = torch.cat([imgs, target_images], dim=0)
+                pred, hidden_outputs = model(total_images)  # forward
+                hidden_outputs = [x for i, x in enumerate(hidden_outputs) if i in da_layers]
+                loss_domain = sum(w * mk_mmd(total_feat.flatten(1), batch_size) for w, total_feat in zip(da_weights, hidden_outputs)).view(1)
+                pred = [x.split(split_size=batch_size)[0] for x in pred]
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                loss_domain *= hyp['da']
+                loss += loss_domain.view(-1)
+                loss_items = torch.cat([loss_items, loss_domain]).detach()
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -322,7 +349,7 @@ def train(hyp, opt, device, tb_writer=None):
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.4g' * 6) % (
+                s = ('%10s' * 2 + '%10.4g' * 7) % (
                     '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
                 pbar.set_description(s)
 
@@ -458,6 +485,9 @@ if __name__ == '__main__':
     parser.add_argument('--weights', type=str, default='yolov5s6.pt', help='initial weights path')
     parser.add_argument('--cfg', type=str, default='./my_cfg/yolov5s6.yaml', help='model.yaml path')
     parser.add_argument('--data', type=str, default='./my_cfg/rddc2020_server.yaml', help='data.yaml path')
+    parser.add_argument('--target-data', type=str, default='./my_cfg/target_data.yaml', help='target data.yaml')
+    parser.add_argument('--da-layers', type=int, default=[4, 6, 10], help='layer id for compute da loss')
+    parser.add_argument('--da_weights', type=float, default=[0.33, 0.33, 0.33], help='weights for mmd')
     parser.add_argument('--hyp', type=str, default='data/hyp.finetune.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
@@ -495,9 +525,6 @@ if __name__ == '__main__':
     opt.world_size = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1
     opt.global_rank = int(os.environ['RANK']) if 'RANK' in os.environ else -1
     set_logging(opt.global_rank)
-    if opt.global_rank in [-1, 0]:
-        check_git_status()
-        check_requirements()
 
     # Resume
     wandb_run = check_wandb_resume(opt)
