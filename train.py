@@ -255,7 +255,7 @@ def train(hyp, opt, device, tb_writer=None):
     scheduler.last_epoch = start_epoch - 1  # do not move
     scaler = amp.GradScaler(enabled=cuda)
     compute_loss = ComputeLoss(model)  # init loss class
-    mk_mmd = MKMMD2()
+    mk_mmd = MKMMD2(kernel_num=2)
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
                 f'Logging results to {save_dir}\n'
@@ -288,7 +288,7 @@ def train(hyp, opt, device, tb_writer=None):
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
-        logger.info(('\n' + '%10s' * 9) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'da', 'total', 'labels', 'img_size'))
+        logger.info(('\n' + '%10s' * 9) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'da', 'labels', 'img_size'))
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
@@ -297,7 +297,11 @@ def train(hyp, opt, device, tb_writer=None):
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
-            target_images, target_paths, _ = next(target_iter)
+            try:
+                target_images, target_paths, _ = next(target_iter)
+            except StopIteration:
+                target_iter = iter(target_dataloader)
+                target_images, target_paths, _ = next(target_iter)
             target_images = target_images.to(device, non_blocking=True).float() / 255.0
             # Warmup
             if ni <= nw:
@@ -327,8 +331,9 @@ def train(hyp, opt, device, tb_writer=None):
                 pred = [x.split(split_size=batch_size)[0] for x in pred]
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                 loss_domain *= hyp['da']
-                loss += loss_domain.view(-1)
                 loss_items = torch.cat([loss_items, loss_domain]).detach()
+                loss_domain *= batch_size
+                loss += loss_domain.view(-1)
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -482,14 +487,14 @@ def train(hyp, opt, device, tb_writer=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default='yolov5s6.pt', help='initial weights path')
-    parser.add_argument('--cfg', type=str, default='./my_cfg/yolov5s6.yaml', help='model.yaml path')
+    parser.add_argument('--weights', type=str, default='yolov5s_rddc.pt', help='initial weights path')
+    parser.add_argument('--cfg', type=str, default='./my_cfg/yolov5s.yaml', help='model.yaml path')
     parser.add_argument('--data', type=str, default='./my_cfg/rddc2020_server.yaml', help='data.yaml path')
     parser.add_argument('--target-data', type=str, default='./my_cfg/target_data.yaml', help='target data.yaml')
     parser.add_argument('--da-layers', type=int, default=[4, 6, 10], help='layer id for compute da loss')
-    parser.add_argument('--da_weights', type=float, default=[0.33, 0.33, 0.33], help='weights for mmd')
-    parser.add_argument('--hyp', type=str, default='data/hyp.finetune.yaml', help='hyperparameters path')
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--da_weights', type=float, default=[0.33, 0.33 , 0.33], help='weights for mmd')
+    parser.add_argument('--hyp', type=str, default='my_cfg/hyp.finetune.nohsv.yaml', help='hyperparameters path')
+    parser.add_argument('--epochs', type=int, default=15)
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
     parser.add_argument('--img-size', nargs='+', type=int, default=[640, 640], help='[train, test] image sizes')
     parser.add_argument('--rect', action='store_true', help='rectangular training')

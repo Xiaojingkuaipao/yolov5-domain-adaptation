@@ -36,4 +36,4 @@ flipud: 0.00856
 fliplr: 0.5
 mosaic: 1.0
 mixup: 0.25 # 25%的几率开启mixup
-da: 0.1
+da: 0.0269

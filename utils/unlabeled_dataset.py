@@ -12,6 +12,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
+from itertools import repeat
+from multiprocessing.pool import ThreadPool
 from PIL import Image, ExifTags
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -48,14 +50,15 @@ def create_target_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, aug
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
     sampler = torch.utils.data.distributed.DistributedSampler(dataset) if rank != -1 else None
-    loader = torch.utils.data.DataLoader if image_weights else InfiniteDataLoader # 可以无限循环的DataLoader
+    loader = InfiniteDataLoader # 可以无限循环的DataLoader
     # Use torch.utils.data.DataLoader() if dataset.properties will update during training else InfiniteDataLoader()
     dataloader = loader(dataset,
                         batch_size=batch_size,
                         num_workers=nw,
                         sampler=sampler,
                         pin_memory=True,
-                        collate_fn=LoadUnlabeledImages.collate_fn)
+                        collate_fn=LoadUnlabeledImages.collate_fn,
+                        drop_last=True)
     return dataloader, dataset
 
 
@@ -136,8 +139,18 @@ class LoadUnlabeledImages(Dataset):  # for training/testing
         self.indices = range(n)
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
-        self.imgs = [None] * n
         self.length = len(self.img_files)
+        self.imgs = [None] * n
+        if cache_images:
+            gb = 0  # Gigabytes of cached images
+            self.img_hw0, self.img_hw = [None] * n, [None] * n
+            results = ThreadPool(8).imap(lambda x: load_image(*x), zip(repeat(self), range(n)))  # 8 threads
+            pbar = tqdm(enumerate(results), total=n)
+            for i, x in pbar:
+                self.imgs[i], self.img_hw0[i], self.img_hw[i] = x  # img, hw_original, hw_resized = load_image(self, i)
+                gb += self.imgs[i].nbytes
+                pbar.desc = f'{prefix}Caching images ({gb / 1E9:.1f}GB)'
+            pbar.close()
 
 
     def __len__(self):
