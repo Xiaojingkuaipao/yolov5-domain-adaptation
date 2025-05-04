@@ -19,6 +19,7 @@
 *.avi
 *.data
 *.json
+*.tar
 my_data/labels_related
 my_data/*.txt
 
