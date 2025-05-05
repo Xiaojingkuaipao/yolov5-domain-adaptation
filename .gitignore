@@ -26,6 +26,8 @@ my_data/*.txt
 *.cfg
 !cfg/yolov3*.cfg
 
+!assets/*.jpg
+
 storage.googleapis.com
 runs/*
 data/*
