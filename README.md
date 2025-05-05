@@ -7,15 +7,15 @@ This project addresses two critical challenges in road damage detection: **high 
 ## Data & Methodology Visualizations
 
 ### Source vs Target Domain Comparison
-![Source vs Target](assets/source_target_comparison.jpg)
+![Source vs Target](./assets/source_target_comparison.jpg)
 *Left: Samples from source domain (RDD2020 dataset) | Right: Original target domain images (low-light/blurred)*
 
 ### APAGE Enhancement Results
-![APAGE Result](assets/apage_comparison.jpg)
+![APAGE Result](./assets/apage_comparison.jpg)
 *Left: Original underexposed image | Right: After APAGE enhancement*
 
 ### Automatic Labeling Demonstration
-![Labeling Result](assets/labeling_demo.jpg)
+![Labeling Result](./assets/labeling_demo.jpg)
 *Visualization of auto-annotation results after domain adaptation*
 
 ---
